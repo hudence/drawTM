@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>手寫電子白板 × Teachable Machine 即時辨識</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: #121a2f;
+      --text: #e6ecff;
+      --muted: #9fb0d6;
+      --accent: #6aa9ff;
+      --accent-2: #5ce0c7;
+      --danger: #ff6b6b;
+      --bar: #a7b8ff;
+      --border: #273353;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; padding: 0; background: var(--bg); color: var(--text);
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, "Noto Sans TC", "PingFang TC", "Heiti TC", Arial, "Microsoft JhengHei", sans-serif;
+    }
+    .app {
+      max-width: 1200px; margin: 24px auto; padding: 16px;
+      display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px;
+    }
+    .card {
+      background: var(--panel); border: 1px solid var(--border);
+      border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.25);
+    }
+    .card h2 { margin: 0; font-weight: 700; font-size: 18px; }
+    .card .head { display:flex; align-items:center; justify-content:space-between; padding: 14px 16px; border-bottom: 1px solid var(--border);}    
+    .card .body { padding: 16px; }
+
+    /* 左側：白板與工具列 */
+    .toolbar { display:flex; flex-wrap: wrap; gap: 12px; align-items:center; }
+    .toolbar .group { display:flex; gap: 8px; align-items:center; background:#0e1630; border:1px solid var(--border); border-radius: 12px; padding:8px 10px; }
+    .toolbar label { font-size: 13px; color: var(--muted); }
+    .toolbar input[type="range"] { width: 160px; }
+    .btn { cursor:pointer; border:1px solid var(--border); background:#0e1630; color:var(--text); padding:8px 12px; border-radius:12px; font-weight:600; }
+    .btn:hover { filter: brightness(1.1); }
+    .btn-danger { border-color: #6b2e2e; background:#2b0f12; color:#ffb3b3; }
+    .btn-ghost { background: transparent; }
+
+    .pad-wrap { position: relative; margin-top: 14px; border:1px dashed var(--border); border-radius: 14px; overflow: hidden; }
+    .pad { display:block; width: 100%; height: 520px; background: #ffffff; cursor: crosshair; touch-action: none; }
+    .hint { color: var(--muted); font-size: 12px; margin-top: 10px; }
+
+    /* 右側：模型與結果 */
+    .cfg { display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+    .cfg input[type="url"] { flex:1 1 320px; min-width: 260px; background:#0e1630; color:var(--text); border:1px solid var(--border); border-radius:10px; padding:10px 12px; }
+
+    .status { font-size: 13px; color: var(--muted); margin-top: 8px; }
+    .top1 { margin-top: 14px; padding: 12px; border:1px solid var(--border); border-radius: 12px; background:#0d142b; }
+    .top1 .label { font-size: 14px; color: var(--muted); }
+    .top1 .value { font-size: 28px; font-weight: 800; letter-spacing: 1px; margin-top: 2px; }
+
+    .list { margin-top: 12px; display: grid; gap: 10px; }
+    .row { display:grid; grid-template-columns: 120px 1fr 60px; gap: 8px; align-items:center; }
+    .row .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#eaf; }
+    .bar { height: 12px; background:#0a1130; border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+    .bar > i { display:block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); width: 0%; }
+    .pct { text-align:right; font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+
+    @media (max-width: 980px){
+      .app { grid-template-columns: 1fr; }
+      .pad { height: 420px; }
+    }
+  </style>
+</head>
+<body>
+  <!--
+    使用說明（請閱讀）：
+    1) 到 Teachable Machine 建立「影像分類」專案並匯出 Web 版本（Image Project → Export Model → Upload (Hosted)）。
+    2) 取得模型根網址，例如：
+       https://teachablemachine.withgoogle.com/models/XXXXXXXX/
+       將此根網址貼到右側「模型 URL」輸入框，按「載入模型」。
+    3) 在白色畫布上用滑鼠/觸控筆手寫（建議黑色筆），右側即時顯示六類中文字的機率與 Top-1。
+    4) 若直接以檔案開啟在某些瀏覽器可能遇到 CORS 限制，請用任一簡易本機伺服器開啟（例如 VSCode Live Server 或 `python -m http.server 8000`）。
+  -->
+
+  <main class="app">
+    <!-- 左側：手寫白板 -->
+    <section class="card" aria-labelledby="pad-title">
+      <div class="head">
+        <h2 id="pad-title">手寫電子白板</h2>
+        <div class="toolbar">
+          <div class="group">
+            <label for="color">顏色</label>
+            <input id="color" type="color" value="#000000" aria-label="筆刷顏色" />
+          </div>
+          <div class="group">
+            <label for="size">粗細</label>
+            <input id="size" type="range" min="2" max="40" step="1" value="16" aria-label="筆刷粗細" />
+          </div>
+          <button id="eraser" class="btn" type="button" aria-pressed="false">切換橡皮擦</button>
+          <button id="clear" class="btn btn-danger" type="button">清空白板</button>
+          <button id="download" class="btn btn-ghost" type="button">下載PNG</button>
+        </div>
+      </div>
+      <div class="body">
+        <div class="pad-wrap">
+          <canvas id="pad" class="pad" width="800" height="520" aria-label="手寫白板畫布"></canvas>
+        </div>
+        <p class="hint">小技巧：按住滑鼠/手寫筆即可書寫；點按「切換橡皮擦」可擦除；若要重新開始，按「清空白板」。</p>
+      </div>
+    </section>
+
+    <!-- 右側：模型設定與辨識結果 -->
+    <section class="card" aria-labelledby="model-title">
+      <div class="head">
+        <h2 id="model-title">模型設定與即時結果</h2>
+      </div>
+      <div class="body">
+        <div class="cfg">
+          <input id="modelUrl" type="url" placeholder="貼上 Teachable Machine 模型根網址，例如：https://teachablemachine.withgoogle.com/models/XXXXXXXX/" value="https://teachablemachine.withgoogle.com/models/Bwrex04ad/" />
+          <button id="load" class="btn" type="button">載入模型</button>
+          <button id="stop" class="btn btn-ghost" type="button" disabled>暫停/繼續</button>
+        </div>
+        <div id="status" class="status">尚未載入模型</div>
+
+        <div class="top1" aria-live="polite">
+          <div class="label">Top-1 Prediction</div>
+          <div id="top1" class="value">—</div>
+        </div>
+
+        <div id="list" class="list" aria-live="polite" aria-busy="false"></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 依序載入 TFJS 與 Teachable Machine Image 套件 -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.21.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+
+  <script>
+  // ====== 可調整的參數 ======
+  const DEFAULT_MODEL_URL = ""; // 可預先填入你的模型根網址（以 / 結尾），例如 "https://teachablemachine.withgoogle.com/models/XXXXXXXX/"
+  const PREDICT_INTERVAL_MS = 140; // 兩次推論間隔（毫秒），可視效能調整
+
+  // ====== DOM 參照 ======
+  const pad = document.getElementById('pad');
+  const ctx = pad.getContext('2d');
+  const colorEl = document.getElementById('color');
+  const sizeEl = document.getElementById('size');
+  const eraserBtn = document.getElementById('eraser');
+  const clearBtn = document.getElementById('clear');
+  const downloadBtn = document.getElementById('download');
+  const modelUrlEl = document.getElementById('modelUrl');
+  const loadBtn = document.getElementById('load');
+  const stopBtn = document.getElementById('stop');
+  const statusEl = document.getElementById('status');
+  const top1El = document.getElementById('top1');
+  const listEl = document.getElementById('list');
+
+  // ====== 畫布初始化（支援高DPR，滑順筆刷） ======
+  let drawing = false;
+  let erasing = false;
+  let hasInk = false; // 是否已經寫過字
+  let last = {x:0, y:0};
+
+  function setupCanvasDPR() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = pad.getBoundingClientRect();
+    pad.width = Math.round(rect.width * dpr);
+    pad.height = Math.round(rect.height * dpr);
+    ctx.scale(dpr, dpr);
+    // 白底
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+  }
+
+  // 重新依視窗調整畫布尺寸（保留內容）
+  function resizeCanvasKeepingContent() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = pad.getBoundingClientRect();
+    const tmp = document.createElement('canvas');
+    tmp.width = pad.width; tmp.height = pad.height;
+    const tctx = tmp.getContext('2d');
+    tctx.drawImage(pad, 0, 0);
+
+    pad.width = Math.round(rect.width * dpr);
+    pad.height = Math.round(rect.height * dpr);
+    ctx.setTransform(1,0,0,1,0,0); // reset transform before scale
+    ctx.scale(dpr, dpr);
+    // 填白底
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    // 等比例繪回（使用CSS像素）
+    const scaleX = rect.width / (tmp.width / dpr);
+    const scaleY = rect.height / (tmp.height / dpr);
+    const scale = Math.min(scaleX, scaleY);
+    const drawW = (tmp.width / dpr) * scale;
+    const drawH = (tmp.height / dpr) * scale;
+    ctx.drawImage(tmp, 0, 0, tmp.width, tmp.height, 0, 0, drawW, drawH);
+  }
+
+  function getPos(e){
+    const rect = pad.getBoundingClientRect();
+    const isTouch = e.touches && e.touches.length;
+    const clientX = isTouch ? e.touches[0].clientX : e.clientX;
+    const clientY = isTouch ? e.touches[0].clientY : e.clientY;
+    return { x: clientX - rect.left, y: clientY - rect.top };
+  }
+
+  function strokeStyle(){
+    return erasing ? '#ffffff' : colorEl.value;
+  }
+
+  function lineWidth(){
+    return parseFloat(sizeEl.value);
+  }
+
+  function startDraw(e){
+    drawing = true; hasInk = true;
+    last = getPos(e); e.preventDefault();
+  }
+
+  function draw(e){
+    if(!drawing) return; e.preventDefault();
+    const p = getPos(e);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = strokeStyle();
+    ctx.lineWidth = lineWidth();
+
+    ctx.beginPath();
+    ctx.moveTo(last.x, last.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    last = p;
+  }
+
+  function endDraw(){ drawing = false; }
+
+  function clearPad(){
+    const rect = pad.getBoundingClientRect();
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+    hasInk = false;
+  }
+
+  function downloadPNG(){
+    const link = document.createElement('a');
+    link.download = 'handwriting.png';
+    link.href = pad.toDataURL('image/png');
+    link.click();
+  }
+
+  // 事件綁定（滑鼠＋觸控＋Pointer Events）
+  pad.addEventListener('pointerdown', startDraw);
+  pad.addEventListener('pointermove', draw);
+  window.addEventListener('pointerup', endDraw);
+  pad.addEventListener('touchstart', startDraw, {passive:false});
+  pad.addEventListener('touchmove', draw, {passive:false});
+  pad.addEventListener('touchend', endDraw);
+
+  clearBtn.addEventListener('click', clearPad);
+  downloadBtn.addEventListener('click', downloadPNG);
+  eraserBtn.addEventListener('click', () => {
+    erasing = !erasing;
+    eraserBtn.setAttribute('aria-pressed', String(erasing));
+    eraserBtn.textContent = erasing ? '使用畫筆' : '切換橡皮擦';
+  });
+
+  window.addEventListener('resize', () => {
+    resizeCanvasKeepingContent();
+  });
+
+  // 初始畫布設定
+  // 先用CSS大小排版，等DOM完成後依據實際大小與DPR調整內部解析度
+  window.addEventListener('load', () => {
+    setupCanvasDPR();
+    if (DEFAULT_MODEL_URL) {
+      modelUrlEl.value = DEFAULT_MODEL_URL;
+      loadModel();
+    }
+  });
+
+  // ====== 模型載入與推論 ======
+  let model = null;
+  let labels = [];
+  let predicting = false; // 是否持續推論
+  let rafId = 0; // requestAnimationFrame id for loop
+  let lastPredTs = 0;
+
+  function setStatus(msg){ statusEl.textContent = msg; }
+
+  async function loadModel(){
+    try {
+      const base = (modelUrlEl.value || '').trim();
+      if(!base) { alert('請先貼上模型根網址（以 / 結尾）'); return; }
+      const modelURL = base.endsWith('/') ? base + 'model.json' : base + '/model.json';
+      const metadataURL = base.endsWith('/') ? base + 'metadata.json' : base + '/metadata.json';
+
+      setStatus('下載/載入模型中…');
+      stopPredict();
+      model = await tmImage.load(modelURL, metadataURL);
+      labels = (model.getClassLabels && await model.getClassLabels()) || [];
+      setStatus(`模型已載入，共 ${model.getTotalClasses()} 類別`);
+
+      // 建立列表 UI
+      buildRows();
+      // 暖機（第一次推論通常較慢）
+      await model.predict(pad);
+
+      startPredict();
+    } catch (err){
+      console.error(err);
+      setStatus('載入失敗：' + err.message);
+    }
+  }
+
+  function buildRows(){
+    listEl.innerHTML = '';
+    const total = model.getTotalClasses();
+    for(let i=0;i<total;i++){
+      const row = document.createElement('div'); row.className = 'row';
+      const name = document.createElement('div'); name.className = 'name';
+      name.textContent = labels[i] || `Class ${i+1}`;
+      const bar = document.createElement('div'); bar.className = 'bar';
+      const fill = document.createElement('i'); bar.appendChild(fill);
+      const pct = document.createElement('div'); pct.className = 'pct'; pct.textContent = '0.0%';
+      row.appendChild(name); row.appendChild(bar); row.appendChild(pct);
+      listEl.appendChild(row);
+    }
+  }
+
+  async function predictOnce(){
+    if(!model) return;
+    if(!hasInk){
+      top1El.textContent = '請在左側畫布開始手寫…';
+      // 將所有列歸零
+      for(const row of listEl.children){
+        row.querySelector('.bar > i').style.width = '0%';
+        row.querySelector('.pct').textContent = '0.0%';
+      }
+      return;
+    }
+
+    const preds = await model.predict(pad);
+    // 按機率排序並顯示
+    preds.sort((a,b)=> b.probability - a.probability);
+    const top = preds[0];
+    top1El.textContent = `${top.className}  (${(top.probability*100).toFixed(1)}%)`;
+
+    // 顯示到對應列：依原始順序（metadata/labels）
+    const nameIndex = Object.create(null);
+    labels.forEach((n,i)=> nameIndex[n]=i);
+    for(const p of preds){
+      const idx = nameIndex[p.className];
+      const row = listEl.children[idx];
+      if(!row) continue;
+      const width = Math.round(p.probability * 10000) / 100; // 兩位小數
+      row.querySelector('.bar > i').style.width = width + '%';
+      row.querySelector('.pct').textContent = width.toFixed(1) + '%';
+    }
+  }
+
+  function loop(ts){
+    if(ts - lastPredTs >= PREDICT_INTERVAL_MS){
+      lastPredTs = ts;
+      predictOnce();
+    }
+    if(predicting) rafId = requestAnimationFrame(loop);
+  }
+
+  function startPredict(){
+    if(predicting) return;
+    predicting = true; stopBtn.disabled = false; stopBtn.textContent = '暫停推論';
+    rafId = requestAnimationFrame(loop);
+  }
+  function stopPredict(){
+    predicting = false; stopBtn.disabled = true; cancelAnimationFrame(rafId);
+  }
+
+  // 互動按鈕：載入/暫停
+  loadBtn.addEventListener('click', loadModel);
+  stopBtn.addEventListener('click', () => {
+    if(!model) return;
+    if(predicting){ predicting = false; stopBtn.textContent = '繼續推論'; }
+    else { predicting = true; stopBtn.textContent = '暫停推論'; lastPredTs = 0; rafId = requestAnimationFrame(loop); }
+  });
+
+  // 輔助：若使用者貼上網址後按 Enter 也能啟動
+  modelUrlEl.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') loadModel(); });
+  </script>
+</body>
+</html>
